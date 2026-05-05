@@ -5,7 +5,7 @@ import {
 } from "@opencode-ai/sdk/v2";
 import type { Violation } from "./types.js";
 
-const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+const MODEL = { providerID: "anthropic", modelID: "claude-haiku-4-5" };
 
 function buildPrompt(servicePath: string): string {
   return `You are a strict conformance auditor for Rust microservices.
