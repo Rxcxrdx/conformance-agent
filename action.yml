@@ -4,19 +4,23 @@ description: >
   Uses OpenCode to autonomously explore the repository and detect
   architectural violations (BOX-001/002/003) plus deterministic
   Dockerfile checks (OCI-003/004/005).
+  Supports evaluating a single service or all services in a directory.
 
 inputs:
   service-path:
-    description: "Relative path to the Rust service to evaluate (from repo root)"
-    required: true
+    description: "Relative path to a single Rust service to evaluate (from repo root)"
+    required: false
+  services-dir:
+    description: "Relative path to a directory containing multiple services (evaluates all subdirs)"
+    required: false
 
 outputs:
   decision:
-    description: "Conformance decision: pass | manual_review | block"
+    description: "Overall conformance decision: pass | manual_review | block"
   confidence:
     description: "Confidence score (0.0 – 1.0)"
   violations:
-    description: "JSON array of violations found"
+    description: "JSON array of all violations found"
 
 runs:
   using: "composite"
@@ -34,24 +38,22 @@ runs:
     - name: Run conformance gate
       id: gate
       shell: bash
-      # Run from repo root so OpenCode has access to all service files
       working-directory: ${{ github.workspace }}
       env:
         ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
         INPUT_SERVICE_PATH: ${{ inputs.service-path }}
+        INPUT_SERVICES_DIR: ${{ inputs.services-dir }}
       run: |
         set +e
         OUTPUT=$(${{ github.action_path }}/node_modules/.bin/tsx \
-          ${{ github.action_path }}/src/index.ts \
-          --service "${{ inputs.service-path }}" 2>/dev/fd/2)
+          ${{ github.action_path }}/src/index.ts 2>/dev/fd/2)
         EXIT_CODE=$?
 
-        # Parse JSON output and expose as step outputs
         DECISION=$(echo "$OUTPUT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{ try{ const r=JSON.parse(d); process.stdout.write(r.decision||'block') } catch(e){ process.stdout.write('block') } })")
         CONFIDENCE=$(echo "$OUTPUT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{ try{ const r=JSON.parse(d); process.stdout.write(String(r.confidence||0)) } catch(e){ process.stdout.write('0') } })")
         VIOLATIONS=$(echo "$OUTPUT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{ try{ const r=JSON.parse(d); process.stdout.write(JSON.stringify(r.violations||[])) } catch(e){ process.stdout.write('[]') } })")
 
-        echo "decision=$DECISION"   >> "$GITHUB_OUTPUT"
+        echo "decision=$DECISION"     >> "$GITHUB_OUTPUT"
         echo "confidence=$CONFIDENCE" >> "$GITHUB_OUTPUT"
         echo "violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
 

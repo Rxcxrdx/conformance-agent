@@ -1,35 +1,54 @@
-import { resolve } from "path";
+import { resolve, join } from "path";
+import { readdirSync, statSync } from "fs";
 import { checkDockerfile } from "./dockerfile.js";
 import { runAgentChecks } from "./agent.js";
 import { decide } from "./decision.js";
 import type { Violation } from "./types.js";
 
-function parseArgs(): { servicePath: string } {
-  // GitHub Actions injects inputs as INPUT_<NAME> env vars
-  const fromAction = process.env["INPUT_SERVICE_PATH"];
-  if (fromAction) {
-    return { servicePath: resolve(fromAction) };
+function getServicePaths(): string[] {
+  // Option A: single service via INPUT_SERVICE_PATH or --service
+  const fromEnv = process.env["INPUT_SERVICE_PATH"];
+  if (fromEnv) return [resolve(fromEnv)];
+
+  const args = process.argv.slice(2);
+  const svcIdx = args.indexOf("--service");
+  if (svcIdx !== -1 && args[svcIdx + 1]) {
+    return [resolve(args[svcIdx + 1]!)];
   }
 
-  // Local CLI: tsx src/index.ts --service <path>
-  const args = process.argv.slice(2);
-  const idx = args.indexOf("--service");
-  if (idx === -1 || !args[idx + 1]) {
-    console.error("Usage: tsx src/index.ts --service <path-to-service>");
-    console.error("       or set INPUT_SERVICE_PATH env var (GitHub Actions)");
-    process.exit(2);
+  // Option B: all subdirectories in INPUT_SERVICES_DIR or --services-dir
+  const dirFromEnv = process.env["INPUT_SERVICES_DIR"];
+  const dirIdx = args.indexOf("--services-dir");
+  const servicesDir = dirFromEnv ?? (dirIdx !== -1 ? args[dirIdx + 1] : null);
+
+  if (servicesDir) {
+    const resolved = resolve(servicesDir);
+    return readdirSync(resolved)
+      .map((name) => join(resolved, name))
+      .filter((p) => statSync(p).isDirectory());
   }
-  return { servicePath: resolve(args[idx + 1]!) };
+
+  console.error("Usage: tsx src/index.ts --service <path>");
+  console.error("       tsx src/index.ts --services-dir <path>");
+  console.error(
+    "       or set INPUT_SERVICE_PATH / INPUT_SERVICES_DIR env vars",
+  );
+  process.exit(2);
 }
 
-async function main(): Promise<void> {
-  const { servicePath } = parseArgs();
+async function evaluateService(servicePath: string): Promise<{
+  serviceName: string;
+  decision: string;
+  confidence: number;
+  violations: Violation[];
+}> {
   const serviceName = servicePath.split("/").pop() ?? servicePath;
 
-  console.error(`\n[conformance-gate] Evaluating: ${serviceName}`);
-  console.error(`[conformance-gate] Path: ${servicePath}\n`);
+  console.error(`\n${"─".repeat(60)}`);
+  console.error(`[conformance-gate] Evaluating: ${serviceName}`);
+  console.error(`[conformance-gate] Path: ${servicePath}`);
+  console.error(`${"─".repeat(60)}`);
 
-  // Step A — deterministic Dockerfile checks (no LLM, instant)
   console.error("[Step A] Checking Dockerfile (OCI-003/004/005)...");
   const dockerViolations = checkDockerfile(servicePath);
   if (dockerViolations.length > 0) {
@@ -40,16 +59,10 @@ async function main(): Promise<void> {
     console.error("  ✅ Dockerfile checks passed");
   }
 
-  // Step B — OpenCode agent explores the repo and checks BOX-001/002/003
-  // The agent uses file.read + find.files tools autonomously — no manual source reading
   console.error(
     "\n[Step B] OpenCode agent analyzing source (BOX-001/002/003)...",
   );
-  console.error("  → Agent is exploring the repository with file tools...");
-
-  let agentViolations: Violation[] = [];
-  agentViolations = await runAgentChecks(servicePath);
-
+  const agentViolations = await runAgentChecks(servicePath);
   if (agentViolations.length > 0) {
     agentViolations.forEach((v) =>
       console.error(`  ❌ ${v.rule} [${v.severity}]: ${v.detail}`),
@@ -58,7 +71,6 @@ async function main(): Promise<void> {
     console.error("  ✅ Agent found no BOX violations");
   }
 
-  // Decision
   const allViolations = [...dockerViolations, ...agentViolations];
   const result = decide(serviceName, allViolations);
 
@@ -68,19 +80,72 @@ async function main(): Promise<void> {
       : result.decision === "manual_review"
         ? "⚠️"
         : "❌";
+  console.error(
+    `\n${icon} ${serviceName}: ${result.decision.toUpperCase()} (confidence: ${result.confidence})`,
+  );
+
+  return {
+    serviceName,
+    decision: result.decision,
+    confidence: result.confidence,
+    violations: allViolations,
+  };
+}
+
+async function main(): Promise<void> {
+  const servicePaths = getServicePaths();
 
   console.error(
-    `\n${icon} DECISION: ${result.decision.toUpperCase()} (confidence: ${result.confidence})`,
+    `\n[conformance-gate] Services to evaluate: ${servicePaths.length}`,
   );
-  console.error(`   ${result.summary}\n`);
+
+  const results = [];
+  let hasBlock = false;
+
+  for (const servicePath of servicePaths) {
+    const result = await evaluateService(servicePath);
+    results.push(result);
+    if (result.decision === "block") hasBlock = true;
+  }
+
+  // Overall decision: block if any service blocks
+  const overallDecision = hasBlock
+    ? "block"
+    : results.some((r) => r.decision === "manual_review")
+      ? "manual_review"
+      : "pass";
+
+  const overallConfidence = Math.min(...results.map((r) => r.confidence));
+  const allViolations = results.flatMap((r) => r.violations);
+
+  console.error(`\n${"═".repeat(60)}`);
+  console.error(`[conformance-gate] OVERALL: ${overallDecision.toUpperCase()}`);
+  results.forEach((r) => {
+    const icon =
+      r.decision === "pass"
+        ? "✅"
+        : r.decision === "manual_review"
+          ? "⚠️"
+          : "❌";
+    console.error(`  ${icon} ${r.serviceName}: ${r.decision}`);
+  });
+  console.error(`${"═".repeat(60)}\n`);
 
   // Structured JSON to stdout — CI can parse this for audit logs
-  console.log(JSON.stringify(result, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        decision: overallDecision,
+        confidence: overallConfidence,
+        violations: allViolations,
+        services: results,
+      },
+      null,
+      2,
+    ),
+  );
 
-  // exit 1 on block → GitHub Actions job fails → merge is blocked
-  if (result.decision === "block") {
-    process.exit(1);
-  }
+  if (hasBlock) process.exit(1);
 }
 
 main().catch((err) => {
