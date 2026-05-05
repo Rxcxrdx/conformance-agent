@@ -1,0 +1,17 @@
+{
+  "name": "conformance-gate",
+  "version": "1.0.0",
+  "description": "Autonomous conformance gate agent for Rust services",
+  "type": "module",
+  "scripts": {
+    "check": "npx tsx src/index.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "latest"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}
