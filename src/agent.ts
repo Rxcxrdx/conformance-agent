@@ -53,6 +53,10 @@ BOX-001 · severity: high · response_shape_homogeneous
     { "success": false, "error": "<string message>" }
   Flag handlers returning raw structs, Vec, String, plain StatusCode,
   or shapes without "success" + ("data" | "error").
+  EXCEPTION: Infrastructure/tooling endpoints are exempt from this rule:
+    - /openapi.json  → MUST return the raw OpenAPI spec (standard format consumed by Swagger UI)
+    - /swagger-ui/*  → serves Swagger UI assets, exempt by definition
+  Do NOT flag handlers that serve /openapi.json or /swagger-ui for BOX-001.
 
 BOX-002 · severity: high · no_panics_exposed
   Production code (outside #[cfg(test)]) must NOT call
