@@ -3,6 +3,7 @@ import { readdirSync, statSync } from "fs";
 import { checkDockerfile } from "./dockerfile.js";
 import { createAgentClient, runAgentChecks } from "./agent.js";
 import { decide } from "./decision.js";
+import { renderComplianceReport } from "./report.js";
 import type { Violation } from "./types.js";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
@@ -37,7 +38,10 @@ function getServicePaths(): string[] {
   process.exit(2);
 }
 
-async function evaluateService(client: OpencodeClient, servicePath: string): Promise<{
+async function evaluateService(
+  client: OpencodeClient,
+  servicePath: string,
+): Promise<{
   serviceName: string;
   decision: string;
   confidence: number;
@@ -50,27 +54,23 @@ async function evaluateService(client: OpencodeClient, servicePath: string): Pro
   console.error(`[conformance-gate] Path: ${servicePath}`);
   console.error(`${"─".repeat(60)}`);
 
-  console.error("[Step A] Checking Dockerfile (OCI-003/004/005)...");
+  console.error("[Step A] Checking Dockerfile (OCI rules)...");
   const dockerViolations = checkDockerfile(servicePath);
-  if (dockerViolations.length > 0) {
-    dockerViolations.forEach((v) =>
-      console.error(`  ❌ ${v.rule} [${v.severity}]: ${v.detail}`),
-    );
-  } else {
-    console.error("  ✅ Dockerfile checks passed");
-  }
+  console.error(
+    `         ${dockerViolations.length === 0 ? "✅ all OCI checks passed" : `❌ ${dockerViolations.length} OCI violation(s)`}`,
+  );
 
-  console.error("[Step B] OpenCode agent analyzing source (BOX-001/002/003)...");
+  console.error("[Step B] OpenCode agent analyzing source (BOX rules)...");
   const agentViolations = await runAgentChecks(client, servicePath);
-  if (agentViolations.length > 0) {
-    agentViolations.forEach((v) =>
-      console.error(`  ❌ ${v.rule} [${v.severity}]: ${v.detail}`),
-    );
-  } else {
-    console.error("  ✅ Agent found no BOX violations");
-  }
+  console.error(
+    `         ${agentViolations.length === 0 ? "✅ no BOX violations found" : `❌ ${agentViolations.length} BOX violation(s)`}`,
+  );
 
   const allViolations = [...dockerViolations, ...agentViolations];
+
+  // Per-service compliance table: every rule with PASS/FAIL + detail
+  renderComplianceReport(serviceName, allViolations);
+
   const result = decide(serviceName, allViolations);
 
   const icon =
@@ -80,7 +80,7 @@ async function evaluateService(client: OpencodeClient, servicePath: string): Pro
         ? "⚠️"
         : "❌";
   console.error(
-    `\n${icon} ${serviceName}: ${result.decision.toUpperCase()} (confidence: ${result.confidence})`,
+    `${icon} ${serviceName}: ${result.decision.toUpperCase()} (confidence: ${result.confidence})`,
   );
 
   return {
@@ -129,7 +129,12 @@ async function main(): Promise<void> {
         : r.decision === "manual_review"
           ? "⚠️"
           : "❌";
-    console.error(`  ${icon} ${r.serviceName}: ${r.decision}`);
+    const failedCount = r.violations.length;
+    const failedSummary =
+      failedCount === 0
+        ? "all rules passed"
+        : `${failedCount} violation(s): ${r.violations.map((v) => v.rule).join(", ")}`;
+    console.error(`  ${icon} ${r.serviceName}: ${r.decision} — ${failedSummary}`);
   });
   console.error(`${"═".repeat(60)}\n`);
 
