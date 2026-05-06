@@ -1,9 +1,10 @@
 import { resolve, join } from "path";
 import { readdirSync, statSync } from "fs";
 import { checkDockerfile } from "./dockerfile.js";
-import { runAgentChecks } from "./agent.js";
+import { createAgentClient, runAgentChecks } from "./agent.js";
 import { decide } from "./decision.js";
 import type { Violation } from "./types.js";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 function getServicePaths(): string[] {
   // Option A: single service via INPUT_SERVICE_PATH or --service
@@ -36,7 +37,7 @@ function getServicePaths(): string[] {
   process.exit(2);
 }
 
-async function evaluateService(servicePath: string): Promise<{
+async function evaluateService(client: OpencodeClient, servicePath: string): Promise<{
   serviceName: string;
   decision: string;
   confidence: number;
@@ -59,10 +60,8 @@ async function evaluateService(servicePath: string): Promise<{
     console.error("  ✅ Dockerfile checks passed");
   }
 
-  console.error(
-    "\n[Step B] OpenCode agent analyzing source (BOX-001/002/003)...",
-  );
-  const agentViolations = await runAgentChecks(servicePath);
+  console.error("[Step B] OpenCode agent analyzing source (BOX-001/002/003)...");
+  const agentViolations = await runAgentChecks(client, servicePath);
   if (agentViolations.length > 0) {
     agentViolations.forEach((v) =>
       console.error(`  ❌ ${v.rule} [${v.severity}]: ${v.detail}`),
@@ -99,11 +98,14 @@ async function main(): Promise<void> {
     `\n[conformance-gate] Services to evaluate: ${servicePaths.length}`,
   );
 
+  // Start ONE server for all services — reuse across evaluations
+  const client = await createAgentClient();
+
   const results = [];
   let hasBlock = false;
 
   for (const servicePath of servicePaths) {
-    const result = await evaluateService(servicePath);
+    const result = await evaluateService(client, servicePath);
     results.push(result);
     if (result.decision === "block") hasBlock = true;
   }
