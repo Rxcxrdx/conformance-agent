@@ -116,7 +116,7 @@ export async function runAgentChecks(
 
   console.error(`[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`);
   const result = await client.session.prompt({
-    path: { id: sessionId },
+    path: { sessionID: sessionId },
     body: {
       model: MODEL,
       parts: [{ type: "text", text: buildPrompt(servicePath, sourceCode) }],
