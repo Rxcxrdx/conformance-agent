@@ -65,5 +65,55 @@ export function checkDockerfile(servicePath: string): Violation[] {
     });
   }
 
+  // OCI-008: base image must be pinned (no :latest, no missing tag)
+  const fromLines = content.match(/^\s*FROM\s+(\S+)/gim) ?? [];
+  for (const line of fromLines) {
+    const img = line.replace(/^\s*FROM\s+/i, "").trim();
+    if (img.endsWith(":latest")) {
+      violations.push({
+        rule: "OCI-008",
+        severity: "high",
+        detail: `FROM uses :latest tag (${img}) — pin a specific version for reproducibility`,
+      });
+    } else if (!img.includes(":") && !img.includes("@")) {
+      violations.push({
+        rule: "OCI-008",
+        severity: "high",
+        detail: `FROM has no tag (${img}) — pin a specific version for reproducibility`,
+      });
+    }
+  }
+
+  // OCI-009: multi-stage build required (at least 2 FROM statements)
+  if (fromLines.length < 2) {
+    violations.push({
+      rule: "OCI-009",
+      severity: "medium",
+      detail: `Dockerfile has only ${fromLines.length} FROM stage(s) — use multi-stage build to keep runtime image small`,
+    });
+  }
+
+  // OCI-010: apt/yum/apk cache must be cleaned in same RUN layer
+  // Detect any `apt-get install` or `apk add` not followed by cleanup
+  const installRuns =
+    content.match(
+      /RUN\s+[^\n]*(?:apt-get\s+install|apk\s+add|yum\s+install)[^\n]*(\\\n[^\n]*)*/gi,
+    ) ?? [];
+  for (const run of installRuns) {
+    const hasCleanup =
+      /rm\s+-rf\s+\/var\/lib\/apt\/lists/.test(run) ||
+      /apt-get\s+clean/.test(run) ||
+      /--no-cache/.test(run) ||
+      /yum\s+clean\s+all/.test(run);
+    if (!hasCleanup) {
+      violations.push({
+        rule: "OCI-010",
+        severity: "medium",
+        detail: `RUN with package install missing cache cleanup (rm -rf /var/lib/apt/lists/* or --no-cache) — bloats image`,
+      });
+      break; // one is enough
+    }
+  }
+
   return violations;
 }

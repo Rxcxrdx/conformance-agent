@@ -48,25 +48,49 @@ Below are ALL the source files for the service at: ${servicePath}
 ${sourceCode}
 
 ─────────────────────────────────────────────────────────────
-Analyze the code above for ONLY these violations:
+Analyze the code above and report violations of these rules:
 
 BOX-001 · severity: high · response_shape_homogeneous
   Every HTTP handler must return EXACTLY one of:
     { "success": true,  "data": <any payload> }
     { "success": false, "error": "<string message>" }
-  Flag any handler that returns a raw struct, Vec, String,
-  plain StatusCode, or any shape that does NOT include both
-  "success" and either "data" or "error".
+  Flag handlers returning raw structs, Vec, String, plain StatusCode,
+  or shapes without "success" + ("data" | "error").
 
 BOX-002 · severity: high · no_panics_exposed
   Production code (outside #[cfg(test)]) must NOT call
-  .unwrap() or .expect() anywhere.
+  .unwrap(), .expect() or panic!() anywhere.
   Flag every occurrence with file path and line number.
 
 BOX-003 · severity: low · hexagonal_structure
   Business logic must live in domain/ modules only.
   Handlers in routes/ must only: extract params → call domain → wrap in envelope.
-  Flag if routes/ handlers contain inline business logic.
+  Flag if routes/ contain inline business logic (DB queries, HTTP calls,
+  data transformations beyond extracting params).
+
+BOX-004 · severity: high · swagger_ui_registered
+  The service MUST register a /swagger-ui route (look for SwaggerUi::new
+  or .merge(...swagger...) in router setup, typically src/main.rs or src/router.rs).
+  Flag if no /swagger-ui route is registered.
+
+BOX-005 · severity: high · openapi_spec_registered
+  The service MUST register a /openapi.json route serving the OpenAPI spec
+  (look for /openapi.json or openapi route registration).
+  Flag if no /openapi.json route is registered.
+
+BOX-006 · severity: critical · health_endpoint_registered
+  The service MUST register a /health route returning service status.
+  Flag if no /health route is registered.
+
+BOX-007 · severity: medium · structured_logging
+  The service MUST use structured logging via the tracing crate
+  (look for use tracing::, #[instrument], or tracing_subscriber init).
+  Flag if it uses println! or eprintln! in production code instead.
+
+BOX-008 · severity: medium · input_validation
+  Request body extractors (Json<T>, Form<T>, Query<T>) where T contains
+  String fields SHOULD use validation (validator crate, garde, or manual checks).
+  Flag handlers that accept user input without any validation.
 ─────────────────────────────────────────────────────────────
 
 Respond with ONLY this JSON (no markdown, no explanation):
