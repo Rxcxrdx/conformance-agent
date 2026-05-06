@@ -110,9 +110,9 @@ export async function createAgentClient(): Promise<OpencodeClient> {
   const { client } = await createOpencode();
   console.error(`[conformance-gate] OpenCode server ready`);
 
-  // Inject Anthropic API key — path.id = provider ID, body = credentials
+  // v2 SDK: auth.set uses path.providerID, not path.id
   await client.auth.set({
-    path: { id: "anthropic" },
+    path: { providerID: "anthropic" },
     body: { type: "api", key: apiKey },
   });
 
@@ -140,7 +140,7 @@ export async function runAgentChecks(
 
   console.error(`[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`);
   const result = await client.session.prompt({
-    path: { id: sessionId },
+    path: { sessionID: sessionId },
     body: {
       model: MODEL,
       parts: [{ type: "text", text: buildPrompt(servicePath, sourceCode) }],
