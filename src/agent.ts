@@ -140,39 +140,44 @@ export async function runAgentChecks(
 
   console.error(`[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`);
   const result = await client.session.prompt({
-    path: { sessionID: sessionId },
+    path: { id: sessionId },
     body: {
       model: MODEL,
       parts: [{ type: "text", text: buildPrompt(servicePath, sourceCode) }],
     },
   });
 
-  // Try structured_output first, then text part
-  const structured = (result as any)?.data?.info?.structured_output;
-  if (structured?.violations !== undefined) {
-    const violations = (structured.violations ?? []) as Violation[];
-    console.error(`[conformance-gate] Agent found ${violations.length} violation(s)`);
-    return violations;
+  // Fail loudly if the SDK call returned an error envelope — never silently pass.
+  const sdkError = (result as any)?.error;
+  if (sdkError) {
+    throw new Error(
+      `[conformance-gate] SDK error from session.prompt: ${JSON.stringify(sdkError).slice(0, 800)}`,
+    );
   }
 
-  const parts = (result as any)?.data?.parts ?? [];
+  // Response shape with default "fields" responseStyle: { data: { info, parts }, ... }
+  const data = (result as any)?.data ?? result;
+  const parts = data?.parts ?? [];
   const textPart = parts.find((p: { type: string }) => p.type === "text") as
     | { type: "text"; text: string }
     | undefined;
   const rawText = textPart?.text ?? "";
 
   if (!rawText) {
-    console.error("[conformance-gate] ⚠️  Empty agent response — assuming no violations");
-    console.error(`[conformance-gate] Full result: ${JSON.stringify(result).slice(0, 500)}`);
-    return [];
+    throw new Error(
+      `[conformance-gate] Agent returned empty response — refusing to assume pass. Full result: ${JSON.stringify(result).slice(0, 800)}`,
+    );
   }
+
+  console.error(`[conformance-gate] Agent response (${rawText.length} chars): ${rawText.slice(0, 200)}...`);
 
   const jsonMatch =
     rawText.match(/```(?:json)?\s*([\s\S]*?)```/) ??
     rawText.match(/(\{[\s\S]*\})/);
   if (!jsonMatch) {
-    console.error(`[conformance-gate] ⚠️  No JSON in response:\n${rawText.slice(0, 500)}`);
-    return [];
+    throw new Error(
+      `[conformance-gate] Agent response had no JSON block:\n${rawText.slice(0, 800)}`,
+    );
   }
 
   try {
@@ -180,8 +185,9 @@ export async function runAgentChecks(
     const violations = (parsed.violations ?? []) as Violation[];
     console.error(`[conformance-gate] Agent found ${violations.length} violation(s)`);
     return violations;
-  } catch {
-    console.error(`[conformance-gate] ⚠️  JSON parse failed: ${jsonMatch[1].slice(0, 200)}`);
-    return [];
+  } catch (e) {
+    throw new Error(
+      `[conformance-gate] Agent JSON parse failed: ${(e as Error).message}\nRaw: ${jsonMatch[1].slice(0, 500)}`,
+    );
   }
 }
