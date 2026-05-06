@@ -1,7 +1,4 @@
-import {
-  createOpencode,
-  type OpencodeClient,
-} from "@opencode-ai/sdk/v2";
+import { createOpencode, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import type { Violation } from "./types.js";
@@ -110,10 +107,10 @@ export async function createAgentClient(): Promise<OpencodeClient> {
   const { client } = await createOpencode();
   console.error(`[conformance-gate] OpenCode server ready`);
 
-  // v2 SDK: auth.set uses path.providerID, not path.id
+  // v2 SDK: flat parameters (no path/body wrapping)
   await client.auth.set({
-    path: { providerID: "anthropic" },
-    body: { type: "api", key: apiKey },
+    providerID: "anthropic",
+    auth: { type: "api", key: apiKey },
   });
 
   return client;
@@ -128,7 +125,7 @@ export async function runAgentChecks(
 
   const sessionName = servicePath.split("/").pop() ?? "service";
   const session = await client.session.create({
-    body: { title: `conformance:${sessionName}` },
+    title: `conformance:${sessionName}`,
   });
   const sessionId = (session as any)?.data?.id ?? (session as any)?.id;
   if (!sessionId) {
@@ -138,13 +135,13 @@ export async function runAgentChecks(
   }
   console.error(`[conformance-gate] Session created: ${sessionId}`);
 
-  console.error(`[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`);
+  console.error(
+    `[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`,
+  );
   const result = await client.session.prompt({
-    path: { sessionID: sessionId },
-    body: {
-      model: MODEL,
-      parts: [{ type: "text", text: buildPrompt(servicePath, sourceCode) }],
-    },
+    sessionID: sessionId,
+    model: MODEL,
+    parts: [{ type: "text", text: buildPrompt(servicePath, sourceCode) }],
   });
 
   // Fail loudly if the SDK call returned an error envelope — never silently pass.
@@ -169,7 +166,9 @@ export async function runAgentChecks(
     );
   }
 
-  console.error(`[conformance-gate] Agent response (${rawText.length} chars): ${rawText.slice(0, 200)}...`);
+  console.error(
+    `[conformance-gate] Agent response (${rawText.length} chars): ${rawText.slice(0, 200)}...`,
+  );
 
   const jsonMatch =
     rawText.match(/```(?:json)?\s*([\s\S]*?)```/) ??
@@ -183,7 +182,9 @@ export async function runAgentChecks(
   try {
     const parsed = JSON.parse(jsonMatch[1]);
     const violations = (parsed.violations ?? []) as Violation[];
-    console.error(`[conformance-gate] Agent found ${violations.length} violation(s)`);
+    console.error(
+      `[conformance-gate] Agent found ${violations.length} violation(s)`,
+    );
     return violations;
   } catch (e) {
     throw new Error(
