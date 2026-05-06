@@ -1,11 +1,31 @@
 import {
   createOpencode,
-  createOpencodeClient,
   type OpencodeClient,
 } from "@opencode-ai/sdk/v2";
 import type { Violation } from "./types.js";
 
 const MODEL = { providerID: "anthropic", modelID: "claude-haiku-4-5" };
+
+// JSON schema for structured output — no manual JSON parsing needed
+const VIOLATIONS_SCHEMA = {
+  type: "object",
+  properties: {
+    violations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          rule:     { type: "string", description: "Rule ID: BOX-001, BOX-002, BOX-003, OCI-003, etc." },
+          severity: { type: "string", description: "high | medium | low" },
+          detail:   { type: "string", description: "Exact location and reason for the violation" },
+        },
+        required: ["rule", "severity", "detail"],
+      },
+      description: "List of violations found. Empty array if none.",
+    },
+  },
+  required: ["violations"],
+};
 
 function buildPrompt(servicePath: string): string {
   return `You are a strict conformance auditor for Rust microservices.
@@ -58,70 +78,103 @@ export async function runAgentChecks(
     throw new Error("ANTHROPIC_API_KEY environment variable is not set");
   }
 
-  // createOpencode() starts the OpenCode server automatically
-  // and returns a connected client — no separate Docker service needed.
-  // If a server is already running (local dev), connect to it instead.
-  const existingUrl =
-    process.env["OPENCODE_SERVER_URL"] ?? "http://127.0.0.1:4096";
+  // Always start a fresh OpenCode server — don't probe default port 4096
+  // because in CI other services may occupy it and fool the health check.
+  // Set OPENCODE_SERVER_URL explicitly only if you want to reuse a running instance.
+  const existingUrl = process.env["OPENCODE_SERVER_URL"];
   let client: OpencodeClient;
-  try {
-    const testClient = createOpencodeClient({ baseUrl: existingUrl });
-    await testClient.global.health();
-    client = testClient;
-    console.error(
-      `[conformance-gate] Connected to existing OpenCode server at ${existingUrl}`,
-    );
-  } catch {
-    const { client: newClient } = await createOpencode();
-    client = newClient;
-    console.error(`[conformance-gate] Started new OpenCode server`);
+
+  if (existingUrl) {
+    // Explicit override: try to connect, fall back to fresh server
+    try {
+      const { createOpencodeClient } = await import("@opencode-ai/sdk/v2");
+      const testClient = createOpencodeClient({ baseUrl: existingUrl });
+      await testClient.global.health();
+      client = testClient;
+      console.error(`[conformance-gate] Connected to existing server at ${existingUrl}`);
+    } catch {
+      console.error(`[conformance-gate] Could not reach ${existingUrl} — starting new server`);
+      const { client: c } = await createOpencode();
+      client = c;
+    }
+  } else {
+    console.error(`[conformance-gate] Starting OpenCode server...`);
+    const { client: c } = await createOpencode();
+    client = c;
+    console.error(`[conformance-gate] OpenCode server ready`);
   }
 
-  // Inject Anthropic credentials into the running server
+  // Inject Anthropic API key — correct API: path.id = provider, body = credentials
   await client.auth.set({
-    providerID: "anthropic",
-    auth: { type: "api", key: apiKey },
+    path: { id: "anthropic" },
+    body: { type: "api", key: apiKey },
   });
 
-  // Create an isolated session for this evaluation
+  // Create isolated session — correct API: body.title
   const sessionName = servicePath.split("/").pop() ?? "service";
-  const sessionResp = await client.session.create({
-    title: `conformance:${sessionName}`,
+  const session = await client.session.create({
+    body: { title: `conformance:${sessionName}` },
   });
-  const sessionId = sessionResp.data.id;
+  // SDK returns Session directly in session.data (responseStyle: "fields" default)
+  const sessionId = (session as any)?.data?.id ?? (session as any)?.id;
+  if (!sessionId) {
+    throw new Error(
+      `[conformance-gate] session.create() returned no id — response: ${JSON.stringify(session)}`,
+    );
+  }
+  console.error(`[conformance-gate] Session created: ${sessionId}`);
 
-  // Send the audit prompt — agent uses file.read + find.files to explore the repo,
-  // then returns JSON violations in text. We parse it below.
+  // Send prompt with structured JSON output — no manual parsing needed
+  // Correct API: path.id = session, body = { model, parts, format }
+  console.error(`[conformance-gate] Sending audit prompt to ${MODEL.modelID}...`);
   const result = await client.session.prompt({
-    sessionID: sessionId,
-    model: MODEL,
-    parts: [{ type: "text", text: buildPrompt(servicePath) }],
+    path: { id: sessionId },
+    body: {
+      model: MODEL,
+      parts: [{ type: "text", text: buildPrompt(servicePath) }],
+      format: {
+        type: "json_schema",
+        schema: VIOLATIONS_SCHEMA,
+        retryCount: 2,
+      },
+    },
   });
 
-  const textPart = result.data?.parts?.find(
-    (p: { type: string }) => p.type === "text",
-  ) as { type: "text"; text: string } | undefined;
+  // Structured output is at result.data.info.structured_output
+  const structured = (result as any)?.data?.info?.structured_output;
+  if (structured?.violations !== undefined) {
+    const violations = (structured.violations ?? []) as Violation[];
+    console.error(`[conformance-gate] Agent found ${violations.length} violation(s)`);
+    return violations;
+  }
+
+  // Fallback: parse text part if structured output not available
+  const parts = (result as any)?.data?.parts ?? [];
+  const textPart = parts.find((p: { type: string }) => p.type === "text") as
+    | { type: "text"; text: string }
+    | undefined;
   const rawText = textPart?.text ?? "";
 
-  // Extract the JSON object from the response (may be wrapped in markdown code block)
+  if (!rawText) {
+    console.error("[conformance-gate] ⚠️  Empty agent response — assuming no violations");
+    return [];
+  }
+
   const jsonMatch =
     rawText.match(/```(?:json)?\s*([\s\S]*?)```/) ??
     rawText.match(/(\{[\s\S]*\})/);
   if (!jsonMatch) {
-    console.error(
-      "[conformance-gate] Agent response had no JSON — assuming no violations",
-    );
+    console.error(`[conformance-gate] ⚠️  No JSON in response: ${rawText.slice(0, 300)}`);
     return [];
   }
 
   try {
     const parsed = JSON.parse(jsonMatch[1]);
-    return (parsed.violations ?? []) as Violation[];
+    const violations = (parsed.violations ?? []) as Violation[];
+    console.error(`[conformance-gate] Agent found ${violations.length} violation(s)`);
+    return violations;
   } catch {
-    console.error(
-      "[conformance-gate] Failed to parse agent JSON:",
-      jsonMatch[1],
-    );
+    console.error(`[conformance-gate] ⚠️  JSON parse failed: ${jsonMatch[1].slice(0, 200)}`);
     return [];
   }
 }
