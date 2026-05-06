@@ -99,15 +99,21 @@ async function main(): Promise<void> {
   );
 
   // Start ONE server for all services — reuse across evaluations
-  const client = await createAgentClient();
+  const { client, closeServer } = await createAgentClient();
 
   const results = [];
   let hasBlock = false;
 
-  for (const servicePath of servicePaths) {
-    const result = await evaluateService(client, servicePath);
-    results.push(result);
-    if (result.decision === "block") hasBlock = true;
+  try {
+    for (const servicePath of servicePaths) {
+      const result = await evaluateService(client, servicePath);
+      results.push(result);
+      if (result.decision === "block") hasBlock = true;
+    }
+  } finally {
+    // Always close the OpenCode server — prevents the process from hanging
+    console.error("[conformance-gate] Shutting down OpenCode server...");
+    closeServer();
   }
 
   // Overall decision: block if any service blocks
@@ -134,7 +140,9 @@ async function main(): Promise<void> {
       failedCount === 0
         ? "all rules passed"
         : `${failedCount} violation(s): ${r.violations.map((v) => v.rule).join(", ")}`;
-    console.error(`  ${icon} ${r.serviceName}: ${r.decision} — ${failedSummary}`);
+    console.error(
+      `  ${icon} ${r.serviceName}: ${r.decision} — ${failedSummary}`,
+    );
   });
   console.error(`${"═".repeat(60)}\n`);
 
@@ -152,7 +160,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  if (hasBlock) process.exit(1);
+  process.exit(hasBlock ? 1 : 0);
 }
 
 main().catch((err) => {

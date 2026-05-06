@@ -101,14 +101,18 @@ or
 }
 
 // Start a single OpenCode client shared across all service evaluations.
-export async function createAgentClient(): Promise<OpencodeClient> {
+// Returns both the client AND the server handle so the caller can close it.
+export async function createAgentClient(): Promise<{
+  client: OpencodeClient;
+  closeServer: () => void;
+}> {
   const apiKey = process.env["ANTHROPIC_API_KEY"];
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY environment variable is not set");
   }
 
   console.error(`[conformance-gate] Starting OpenCode server...`);
-  const { client } = await createOpencode();
+  const { client, server } = await createOpencode();
   console.error(`[conformance-gate] OpenCode server ready`);
 
   // v2 SDK: flat parameters (no path/body wrapping)
@@ -117,7 +121,7 @@ export async function createAgentClient(): Promise<OpencodeClient> {
     auth: { type: "api", key: apiKey },
   });
 
-  return client;
+  return { client, closeServer: () => server.close() };
 }
 
 export async function runAgentChecks(
