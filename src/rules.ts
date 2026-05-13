@@ -92,6 +92,12 @@ export const RULES: RuleSpec[] = [
     category: "BOX",
     name: "Input validation on extractors",
   },
+  {
+    id: "BOX-009",
+    severity: "medium",
+    category: "BOX",
+    name: "Method names in French",
+  },
 ];
 
 export const OCI_RULE_IDS = RULES.filter((r) => r.category === "OCI").map(

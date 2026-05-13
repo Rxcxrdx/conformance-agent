@@ -92,6 +92,13 @@ BOX-008 · severity: medium · input_validation
   Request body extractors (Json<T>, Form<T>, Query<T>) where T contains
   String fields SHOULD use validation (validator crate, garde, or manual checks).
   Flag handlers that accept user input without any validation.
+
+BOX-009 · severity: medium · method_names_in_french
+  Function and method names in production code MUST be written in French.
+  Flag each function/method identifier whose name is clearly not French.
+  Ignore names required by Rust conventions/frameworks/traits, including:
+    main, new, from, default, clone, fmt, into_response.
+  Also ignore technical tokens/acronyms like api, http, id, uuid.
 ─────────────────────────────────────────────────────────────
 
 Respond with ONLY this JSON (no markdown, no explanation):
