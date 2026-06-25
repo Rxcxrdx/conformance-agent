@@ -4,10 +4,12 @@
   "description": "Autonomous conformance gate agent for Rust services",
   "type": "module",
   "scripts": {
-    "check": "npx tsx src/index.ts"
+    "check": "npx tsx src/index.ts",
+    "verify": "tsx test/verify.mts"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.14.39"
+    "@opencode-ai/sdk": "^1.14.39",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

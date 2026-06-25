@@ -2,27 +2,34 @@ import { resolve, join } from "path";
 import { readdirSync, statSync } from "fs";
 import { checkDockerfile } from "./dockerfile.js";
 import { createAgentClient, runAgentChecks } from "./agent.js";
+import { runStaticSourceChecks, enrichViolations } from "./static-source.js";
+import { readProductionSources } from "./source.js";
+import { loadPolicy, DEFAULT_POLICY_PATH } from "./policy.js";
 import { decide } from "./decision.js";
 import { renderComplianceReport } from "./report.js";
-import type { Violation } from "./types.js";
+import type { Policy, Violation } from "./types.js";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+function getArg(flag: string): string | null {
+  const args = process.argv.slice(2);
+  const idx = args.indexOf(flag);
+  return idx !== -1 && args[idx + 1] ? args[idx + 1]! : null;
+}
+
+function getPolicyPath(): string {
+  return (
+    process.env["INPUT_POLICY_PATH"] || getArg("--policy") || DEFAULT_POLICY_PATH
+  );
+}
+
 function getServicePaths(): string[] {
-  // Option A: single service via INPUT_SERVICE_PATH or --service
   const fromEnv = process.env["INPUT_SERVICE_PATH"];
   if (fromEnv) return [resolve(fromEnv)];
 
-  const args = process.argv.slice(2);
-  const svcIdx = args.indexOf("--service");
-  if (svcIdx !== -1 && args[svcIdx + 1]) {
-    return [resolve(args[svcIdx + 1]!)];
-  }
+  const single = getArg("--service");
+  if (single) return [resolve(single)];
 
-  // Option B: all subdirectories in INPUT_SERVICES_DIR or --services-dir
-  const dirFromEnv = process.env["INPUT_SERVICES_DIR"];
-  const dirIdx = args.indexOf("--services-dir");
-  const servicesDir = dirFromEnv ?? (dirIdx !== -1 ? args[dirIdx + 1] : null);
-
+  const servicesDir = process.env["INPUT_SERVICES_DIR"] || getArg("--services-dir");
   if (servicesDir) {
     const resolved = resolve(servicesDir);
     return readdirSync(resolved)
@@ -30,17 +37,16 @@ function getServicePaths(): string[] {
       .filter((p) => statSync(p).isDirectory());
   }
 
-  console.error("Usage: tsx src/index.ts --service <path>");
-  console.error("       tsx src/index.ts --services-dir <path>");
-  console.error(
-    "       or set INPUT_SERVICE_PATH / INPUT_SERVICES_DIR env vars",
-  );
+  console.error("Usage: tsx src/index.ts --service <path> [--policy <path>]");
+  console.error("       tsx src/index.ts --services-dir <path> [--policy <path>]");
+  console.error("       or set INPUT_SERVICE_PATH / INPUT_SERVICES_DIR / INPUT_POLICY_PATH");
   process.exit(2);
 }
 
 async function evaluateService(
   client: OpencodeClient,
   servicePath: string,
+  policy: Policy,
 ): Promise<{
   serviceName: string;
   decision: string;
@@ -54,31 +60,32 @@ async function evaluateService(
   console.error(`[conformance-gate] Path: ${servicePath}`);
   console.error(`${"─".repeat(60)}`);
 
-  console.error("[Step A] Checking Dockerfile (OCI rules)...");
-  const dockerViolations = checkDockerfile(servicePath);
+  // Read production source once; shared by the static and AI engines.
+  const sources = readProductionSources(servicePath);
+
+  console.error("[Step A] Deterministic checks (Dockerfile OCI + source BOX)...");
+  const dockerRaw = checkDockerfile(servicePath, policy.rules);
+  const staticRaw = runStaticSourceChecks(policy.rules, sources);
   console.error(
-    `         ${dockerViolations.length === 0 ? "✅ all OCI checks passed" : `❌ ${dockerViolations.length} OCI violation(s)`}`,
+    `         ${dockerRaw.length + staticRaw.length === 0 ? "✅ all deterministic checks passed" : `❌ ${dockerRaw.length + staticRaw.length} violation(s)`}`,
   );
 
-  console.error("[Step B] OpenCode agent analyzing source (BOX rules)...");
-  const agentViolations = await runAgentChecks(client, servicePath);
+  console.error("[Step B] AI agent analyzing source (judgement rules)...");
+  const aiRules = policy.rules.filter((r) => r.engine === "ai");
+  const agentRaw = await runAgentChecks(client, sources, aiRules);
   console.error(
-    `         ${agentViolations.length === 0 ? "✅ no BOX violations found" : `❌ ${agentViolations.length} BOX violation(s)`}`,
+    `         ${agentRaw.length === 0 ? "✅ no AI violations found" : `❌ ${agentRaw.length} AI violation(s)`}`,
   );
 
-  const allViolations = [...dockerViolations, ...agentViolations];
+  // Severity is attached here, from the policy — the single source of truth.
+  const allViolations = enrichViolations([...dockerRaw, ...staticRaw, ...agentRaw], policy);
 
-  // Per-service compliance table: every rule with PASS/FAIL + detail
-  renderComplianceReport(serviceName, allViolations);
+  renderComplianceReport(serviceName, allViolations, policy.rules);
 
   const result = decide(serviceName, allViolations);
 
   const icon =
-    result.decision === "pass"
-      ? "✅"
-      : result.decision === "manual_review"
-        ? "⚠️"
-        : "❌";
+    result.decision === "pass" ? "✅" : result.decision === "manual_review" ? "⚠️" : "❌";
   console.error(
     `${icon} ${serviceName}: ${result.decision.toUpperCase()} (confidence: ${result.confidence})`,
   );
@@ -92,13 +99,15 @@ async function evaluateService(
 }
 
 async function main(): Promise<void> {
+  const policyPath = getPolicyPath();
   const servicePaths = getServicePaths();
 
+  const policy = loadPolicy(policyPath);
   console.error(
-    `\n[conformance-gate] Services to evaluate: ${servicePaths.length}`,
+    `[conformance-gate] Policy v${policy.policy_version} loaded (${policy.rules.length} rules) from ${policyPath}`,
   );
+  console.error(`[conformance-gate] Services to evaluate: ${servicePaths.length}`);
 
-  // Start ONE server for all services — reuse across evaluations
   const { client, closeServer } = await createAgentClient();
 
   const results = [];
@@ -106,17 +115,15 @@ async function main(): Promise<void> {
 
   try {
     for (const servicePath of servicePaths) {
-      const result = await evaluateService(client, servicePath);
+      const result = await evaluateService(client, servicePath, policy);
       results.push(result);
       if (result.decision === "block") hasBlock = true;
     }
   } finally {
-    // Always close the OpenCode server — prevents the process from hanging
     console.error("[conformance-gate] Shutting down OpenCode server...");
     closeServer();
   }
 
-  // Overall decision: block if any service blocks
   const overallDecision = hasBlock
     ? "block"
     : results.some((r) => r.decision === "manual_review")
@@ -130,23 +137,15 @@ async function main(): Promise<void> {
   console.error(`[conformance-gate] OVERALL: ${overallDecision.toUpperCase()}`);
   results.forEach((r) => {
     const icon =
-      r.decision === "pass"
-        ? "✅"
-        : r.decision === "manual_review"
-          ? "⚠️"
-          : "❌";
-    const failedCount = r.violations.length;
+      r.decision === "pass" ? "✅" : r.decision === "manual_review" ? "⚠️" : "❌";
     const failedSummary =
-      failedCount === 0
+      r.violations.length === 0
         ? "all rules passed"
-        : `${failedCount} violation(s): ${r.violations.map((v) => v.rule).join(", ")}`;
-    console.error(
-      `  ${icon} ${r.serviceName}: ${r.decision} — ${failedSummary}`,
-    );
+        : `${r.violations.length} violation(s): ${r.violations.map((v) => v.rule).join(", ")}`;
+    console.error(`  ${icon} ${r.serviceName}: ${r.decision} — ${failedSummary}`);
   });
   console.error(`${"═".repeat(60)}\n`);
 
-  // Structured JSON to stdout — CI can parse this for audit logs
   console.log(
     JSON.stringify(
       {

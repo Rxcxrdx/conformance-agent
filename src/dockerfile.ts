@@ -1,8 +1,8 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import type { Violation } from "./types.js";
+import type { RawViolation, Rule } from "./types.js";
 
-const REQUIRED_LABELS = [
+const FALLBACK_LABELS = [
   "org.opencontainers.image.version",
   "org.opencontainers.image.revision",
   "org.opencontainers.image.source",
@@ -10,16 +10,18 @@ const REQUIRED_LABELS = [
   "com.conformance.policy-version",
 ];
 
-export function checkDockerfile(servicePath: string): Violation[] {
+/**
+ * Deterministic Dockerfile engine. The checks are coded (multi-condition logic),
+ * but all metadata — severity, and OCI-005's required label list — comes from
+ * the policy, so the YAML stays the single source of truth.
+ * Emits RawViolation; severity is attached later by enrichViolations().
+ */
+export function checkDockerfile(servicePath: string, rules: Rule[]): RawViolation[] {
   const dockerfilePath = join(servicePath, "Dockerfile");
-  const violations: Violation[] = [];
+  const violations: RawViolation[] = [];
 
   if (!existsSync(dockerfilePath)) {
-    violations.push({
-      rule: "OCI-003",
-      severity: "critical",
-      detail: "Dockerfile not found in service root",
-    });
+    violations.push({ rule: "OCI-003", detail: "Dockerfile not found in service root" });
     return violations;
   }
 
@@ -27,11 +29,7 @@ export function checkDockerfile(servicePath: string): Violation[] {
 
   // OCI-003: HEALTHCHECK must be present
   if (!/^\s*HEALTHCHECK\b/m.test(content)) {
-    violations.push({
-      rule: "OCI-003",
-      severity: "critical",
-      detail: "Dockerfile missing HEALTHCHECK instruction",
-    });
+    violations.push({ rule: "OCI-003", detail: "Dockerfile missing HEALTHCHECK instruction" });
   }
 
   // OCI-004: USER nonroot — must not run as root
@@ -39,7 +37,6 @@ export function checkDockerfile(servicePath: string): Violation[] {
   if (!userMatch) {
     violations.push({
       rule: "OCI-004",
-      severity: "high",
       detail: "Dockerfile missing USER instruction — container runs as root",
     });
   } else {
@@ -47,20 +44,18 @@ export function checkDockerfile(servicePath: string): Violation[] {
     if (user === "root" || user === "0") {
       violations.push({
         rule: "OCI-004",
-        severity: "high",
         detail: `Dockerfile sets USER to "${userMatch[1]}" — must be a non-root user`,
       });
     }
   }
 
-  // OCI-005: all required OCI labels must be present
-  const missingLabels = REQUIRED_LABELS.filter(
-    (label) => !content.includes(label),
-  );
+  // OCI-005: all required OCI labels must be present (list comes from policy)
+  const requiredLabels =
+    rules.find((r) => r.id === "OCI-005")?.required_labels ?? FALLBACK_LABELS;
+  const missingLabels = requiredLabels.filter((label) => !content.includes(label));
   if (missingLabels.length > 0) {
     violations.push({
       rule: "OCI-005",
-      severity: "high",
       detail: `Missing required OCI labels: ${missingLabels.join(", ")}`,
     });
   }
@@ -72,13 +67,11 @@ export function checkDockerfile(servicePath: string): Violation[] {
     if (img.endsWith(":latest")) {
       violations.push({
         rule: "OCI-008",
-        severity: "high",
         detail: `FROM uses :latest tag (${img}) — pin a specific version for reproducibility`,
       });
     } else if (!img.includes(":") && !img.includes("@")) {
       violations.push({
         rule: "OCI-008",
-        severity: "high",
         detail: `FROM has no tag (${img}) — pin a specific version for reproducibility`,
       });
     }
@@ -88,13 +81,11 @@ export function checkDockerfile(servicePath: string): Violation[] {
   if (fromLines.length < 2) {
     violations.push({
       rule: "OCI-009",
-      severity: "medium",
       detail: `Dockerfile has only ${fromLines.length} FROM stage(s) — use multi-stage build to keep runtime image small`,
     });
   }
 
   // OCI-010: apt/yum/apk cache must be cleaned in same RUN layer
-  // Detect any `apt-get install` or `apk add` not followed by cleanup
   const installRuns =
     content.match(
       /RUN\s+[^\n]*(?:apt-get\s+install|apk\s+add|yum\s+install)[^\n]*(\\\n[^\n]*)*/gi,
@@ -108,7 +99,6 @@ export function checkDockerfile(servicePath: string): Violation[] {
     if (!hasCleanup) {
       violations.push({
         rule: "OCI-010",
-        severity: "medium",
         detail: `RUN with package install missing cache cleanup (rm -rf /var/lib/apt/lists/* or --no-cache) — bloats image`,
       });
       break; // one is enough

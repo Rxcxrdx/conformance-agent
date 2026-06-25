@@ -1,10 +1,10 @@
 name: "Conformance Gate"
 description: >
-  AI-powered conformance gate for Rust microservices.
-  Uses OpenCode to autonomously explore the repository and detect
-  architectural violations (BOX-001/002/003) plus deterministic
-  Dockerfile checks (OCI-003/004/005).
-  Supports evaluating a single service or all services in a directory.
+  Policy-driven conformance gate for Rust microservices. Runs two engines per
+  service: a deterministic static engine (source + Dockerfile regex/logic) and
+  an AI engine for judgement rules (envelope, architecture, validation). Every
+  rule, severity and the AI prompt derive from a single policy YAML
+  (policy-path). Evaluates one service or every service in a directory.
 
 inputs:
   service-path:
@@ -13,6 +13,10 @@ inputs:
   services-dir:
     description: "Relative path to a directory containing multiple services (evaluates all subdirs)"
     required: false
+  policy-path:
+    description: "Relative path to the conformity policy YAML (single source of truth for rules)"
+    required: false
+    default: "policy/conformity-policy.yaml"
 
 outputs:
   decision:
@@ -47,6 +51,7 @@ runs:
         ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
         INPUT_SERVICE_PATH: ${{ inputs.service-path }}
         INPUT_SERVICES_DIR: ${{ inputs.services-dir }}
+        INPUT_POLICY_PATH: ${{ inputs.policy-path }}
       run: |
         set +e
         OUTPUT=$(${{ github.action_path }}/node_modules/.bin/tsx \
